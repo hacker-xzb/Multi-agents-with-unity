@@ -3,13 +3,14 @@ from pydantic import BaseModel
 import logging
 import re
 import os
+import json
+from typing import Dict, Any, List
 import dashscope
 from dashscope import Generation
-from typing import Dict, Any, List
-import json
 
 app = FastAPI()
-# 配置日志
+
+# 配置日志记录
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -17,16 +18,17 @@ logger = logging.getLogger(__name__)
 current_background = """
     - 星际飞船房间编号：
       - 健康室：Room_01
-
 """
 
-#预处理正则化表达加快解析返回内容的速度
+# 正则表达式，用于提取大模型返回各部分内容
 SECTION_REGEX = re.compile(r'\[(\w+)\](.*?)\[/\1\]', re.DOTALL)
 # 角色数据库文件路径
 CHARACTERS_DB_FILE = "characters_db.json"
-dashscope.api_key = os.getenv("DASHSCOPE_API_KEY", "sk-af527af40b3c4d82bbebe333a99601cc")
 
-# 加载角色数据库（初始化时加载）
+# 配置 dashscope API Key（请确保环境变量中已设置或直接填入有效的 API Key）
+dashscope.api_key = os.getenv("DASHSCOPE_API_KEY", "sk-your-real-api-key")
+
+# 加载角色数据库；如文件不存在则使用默认值
 def load_characters() -> dict:
     try:
         with open(CHARACTERS_DB_FILE, "r", encoding="utf-8") as f:
@@ -51,14 +53,15 @@ def load_characters() -> dict:
         logger.error(f"加载角色数据库失败: {str(e)}", exc_info=True)
         return {}
 
-# 初始化角色数据库（全局变量）
+# 初始化角色数据库为全局变量
 characters_db = load_characters()
 
+# 定义请求和响应数据模型
 class TextRequest(BaseModel):
     text: str
 
 class GameBackgroundRequest(BaseModel):
-    background_story: str  # 新增专用背景故事接收模型
+    background_story: str  # 用于更新背景故事
 
 class AiResponse(BaseModel):
     name: str
@@ -67,155 +70,139 @@ class AiResponse(BaseModel):
 
 @app.post("/set_background")
 def set_background(request: GameBackgroundRequest):
-    """接收并存储背景故事的新接口"""
+    """
+    接收并更新背景故事。
+    """
     global current_background
     try:
-        # 基础验证
         if not request.background_story.strip():
             raise HTTPException(status_code=400, detail="背景故事不能为空")
-        
-        # 更新全局背景
         current_background = request.background_story
         logger.info(f"已更新背景故事，长度：{len(current_background)}字符")
-        
         return {
             "status": "success",
             "message": "背景故事已更新",
             "received_length": len(current_background)
         }
-    
     except Exception as e:
         logger.error(f"背景故事更新失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/process", response_model=Dict[str, Any])
 def process_text(request: TextRequest):
-        """处理主要逻辑的原有接口"""
-        try:
-            user_input = request.text.strip()
-            
-            # 生成动态提示（现在使用全局背景）
-            prompt = generate_prompt_template(user_input, current_background, characters_db)
-            
-            # 调用LLM处理任务（包含量化和反思）
-            response = Generation.call(
-                model=Generation.Models.qwen_max,
-                prompt=prompt,
-                stream=False
-            )
-            generated_text = response.output.text.strip()
-            print(generated_text)
-            # 提取结构化数据
-            analysis = extract_analysis(generated_text)
-            actions = extract_actions(generated_text)
-            reflection = analysis.get("reflection", "")
-            
-            formatted_analysis = {
-                # 原始文本字段
-                "analysis": analysis.get("analysis", ""),
-                "conversation": analysis.get("conversation", ""),
-                "conflict": analysis.get("conflict", ""),
-                "conflict_resolution": analysis.get("conflict_resolution", ""),
-                "reflection": analysis.get("reflection", ""),
-                "time_estimate": analysis.get("time_estimate", ""),
-                "progress_events": analysis.get("progress_events", ""),
-                
-                # 结构化数据转为字符串
-                "total_minutes": str(analysis.get("total_minutes", 0)),
-                "progress_json": json.dumps(analysis.get("progress_events", []))
-                }
-
-            # 根据反思更新角色描述
-            if reflection:
-                update_characters(reflection)
-            print(f"analysis: {analysis}")
-            print(f"actions: {actions}")
-            return {
-                "analysis": analysis,
-                "actions": actions
-            }
+    try:
+        user_input = request.text.strip()
+        prompt = generate_prompt_template(user_input, current_background, characters_db)
         
-        except json.JSONDecodeError as e:
-         # 直接返回错误信息到客户端
-            error_msg = f"JSON 解析失败: {str(e)}。原始 actions_str 内容:\n{actions_str}"
-            logging.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
-
-
-    # 以下原有工具函数保持不变
-def generate_prompt_template(user_input, background, characters):
-        formatted_chars = "\n      - ".join([
-            f"{k}（{v['role']}）：{v['description']}" 
-            for k, v in characters.items()
-        ])
+        # 调用大模型生成响应（请确保 dashscope 接口正确返回文本格式）
+        response = Generation.call(
+            model=Generation.Models.qwen_max,
+            prompt=prompt,
+            stream=False
+        )
+        generated_text = response.output.text.strip()
+        logger.info("大模型返回文本成功")
+        logger.debug(f"生成的文本：{generated_text}")
         
-        return f"""
-        你是一个智能调度系统，请严格按照以下规则处理请求(输出格式一定要严格执行)：
-
-        背景如下：
-        {background}
-
-        角色数据库：
-        - {formatted_chars}
-
-        任务描述：{user_input}
-
-        输出要求：
-        1. 在[ANALYSIS]部分用自然语言描述各角色对于任务都是如何思考的(思考解决方案以及可能出现的问题)
-        2. 在[TIME_ESTIMATE]部分根据角色描述量化时间(最后一定要加上总计xx分钟)
-        3. 在[REFLECTION]部分用自然语言建议角色能力改进
-        4.在[CONVERSATION]根据每个人的人物设定和你给出的分析内容输出人物间的对话（要符合人物设定的主观判断）
-        5.在[CONFLICT]根据角色对问题的分析以及对话输出一些对解决问题的冲突（比如方案冲突优先级冲突）
-        6.在[CONFLICT_RESOLUTION]说明冲突是如何解决的风格需要偏向旁白的感觉
-        7.在[PROGRESS_EVENTS]按进度百分比列出关键事件（例如：10%：初步方案确定(什么样的初步方案)；30%：遇到技术障碍等(什么技术障碍)）
-        总之这些关键事件要比较详细能够模拟出真实感
-        8. [ACTIONS]部分输出严格符合格式的JSON数组：
-        - 每个对象必须包含 name、target_room、response 三个字段
-        - 使用英文双引号（"..."）包裹键名和字符串值
-        - 例如：[{{"name": "ms", "target_room": "Room_02", "response": "正在检查空调系统..."}}]
-        # 重要规则(确保遵守以上规则的同时执行这些规则)：
-        1. 每个部分必须用【[SECTION_NAME]】和【[/SECTION_NAME]】包裹
-        2. 不得添加任何额外文本或格式（如Markdown）
-        3. 如果某个部分无内容，仍需保留空的标记对
-        4. 禁止使用中文标点符号（如“”、——）
-
-        输出格式示例：
-        [ANALYSIS]
-        维修工程师ms能快速诊断问题，但面对复杂故障时需要更多时间...
-        [/ANALYSIS]
+        # 提取大模型返回的结构化数据
+        analysis = extract_analysis(generated_text)
+        actions = extract_actions(generated_text)
+        reflection = analysis.get("reflection", "")
         
-        [CONVERSATION]
-        name：conversation。
-        name2:conversation.....
-        [/CONVERSATION]
+        # 若存在反思内容，更新角色描述并调用 RLHF 更新接口
+        if reflection:
+            update_characters(reflection)
+            reinforcement_learning_update(analysis)
         
-        [CONFLICT]
-        发生了什么冲突
-        [/CONFLICT]
-        
-        [CONFLICT_RESOLUTION]
-        如何解决冲突
-        [/CONFLICT_RESOLUTION]
+        return {
+            "analysis": analysis,
+            "actions": actions
+        }
+    except json.JSONDecodeError as e:
+        error_msg = f"JSON 解析失败: {str(e)}。"
+        logger.error(error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as ex:
+        logger.error(f"处理文本失败: {str(ex)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(ex))
 
-        [REFLECTION]
-        建议增加安全员的高压环境适应性训练，提升其决策效率...
-        [/REFLECTION]
+def generate_prompt_template(user_input: str, background: str, characters: dict) -> str:
+    """
+    根据用户输入、背景故事和角色信息生成大模型提示，
+    提示中要求输出详细的思维链（Chain-of-Thought）及其它结构化内容。
+    """
+    formatted_chars = "\n      - ".join([
+        f"{k}（{v['role']}）：{v['description']}" for k, v in characters.items()
+    ])
+    
+    return f"""
+    你是一个智能调度系统，请严格按照以下规则处理请求(输出格式一定要严格执行)：
+    
+    背景如下：
+    {background}
+    
+    角色数据库：
+    - {formatted_chars}
+    
+    任务描述：{user_input}
+    
+    输出要求：
+    1. 在[ANALYSIS]部分输出详细的思维链（Chain-of-Thought），描述各角色分步思考问题的过程，
+       包括行为决策偏好和改进建议。
+    2. 在[TIME_ESTIMATE]部分量化角色描述所需时间（最后必须写明总计xx分钟）。
+    3. 在[REFLECTION]部分输出自然语言的改进建议，用于后续 RLHF 反思训练。
+    4. 在[CONVERSATION]部分输出各角色间的对话，须符合角色设定。
+    5. 在[CONFLICT]部分描述角色间因决策偏好或任务理解产生的冲突。
+    6. 在[CONFLICT_RESOLUTION]部分说明如何通过合理决策解决冲突（风格偏旁白）。
+    7. 在[PROGRESS_EVENTS]部分按进度百分比列出关键事件。
+    8. 在[ACTIONS]部分输出严格符合格式的 JSON 数组，每个对象包含 name、target_room、response 三个字段，
+       使用英文双引号包裹键名和值，例如：[{{"name": "ms", "target_room": "Room_02", "response": "正在检查空调系统..."}}]
+    
+    重要规则：
+    1. 每个部分必须用【[SECTION_NAME]】和【[/SECTION_NAME]】包裹。
+    2. 不得添加任何额外文本或格式（如 Markdown）。
+    3. 如果某个部分无内容，仍需保留空标记对。
+    4. 禁止使用中文标点符号。
+    
+    输出格式示例：
+    [ANALYSIS]
+    维修工程师ms分步分析问题：第一步检查设备，第二步定位故障原因……
+    [/ANALYSIS]
+    
+    [CONVERSATION]
+    ……
+    [/CONVERSATION]
+    
+    [CONFLICT]
+    ……
+    [/CONFLICT]
+    
+    [CONFLICT_RESOLUTION]
+    ……
+    [/CONFLICT_RESOLUTION]
+    
+    [REFLECTION]
+    建议增加安全员的高压环境适应性训练……
+    [/REFLECTION]
+    
+    [PROGRESS_EVENTS]
+    10%：初步方案确定
+    30%：遇到技术障碍
+    50%：冲突解决
+    80%：完成关键测试
+    100%：任务完成
+    [/PROGRESS_EVENTS]
+    
+    [ACTIONS]
+    [{{"name": "ms", "target_room": "Room_02", "response": "正在检查空调系统..."}}]
+    [/ACTIONS]
+    """
 
-        [PROGRESS_EVENTS]
-        10%：初步方案确定
-        30%：遇到技术障碍
-        50%：冲突解决
-        80%：完成关键测试
-        100%：任务完成
-        [/PROGRESS_EVENTS]
-        
-        
-        [ACTIONS]
-        [{{"name": "ms", "target_room": "Room_02", "response": "正在检查空调系统..."}}]
-        [/ACTIONS]
-        """
-
-def extract_analysis(text: str) -> Dict[str, str]:
+def extract_analysis(text: str) -> Dict[str, Any]:
+    """
+    从大模型返回的文本中解析各个区域的内容：
+    包括 ANALYSIS、CONVERSATION、CONFLICT、CONFLICT_RESOLUTION、REFLECTION、TIME_ESTIMATE、PROGRESS_EVENTS。
+    """
     sections = {
         "ANALYSIS": "analysis",
         "CONVERSATION": "conversation",
@@ -228,85 +215,83 @@ def extract_analysis(text: str) -> Dict[str, str]:
     
     result = {}
     for key, name in sections.items():
-        # 使用非贪婪匹配，允许跨行内容
         pattern = rf'\[{key}\](.*?)\[/{key}\]'
         match = re.search(pattern, text, re.DOTALL)
-        
         if match:
             content = match.group(1).strip()
-            # 清理可能残留的标记符号
+            # 清理行首可能多余的标记
             content = re.sub(r'^\s*\[\+?\]\s*', '', content, flags=re.MULTILINE)
             result[name] = content
         else:
-            # 尝试模糊匹配（处理可能的格式错误）
-            fuzzy_pattern = rf'{key}[\s\S]*?(.*?)(?=\n\[|$)'
-            fuzzy_match = re.search(fuzzy_pattern, text, re.IGNORECASE)
-            result[name] = fuzzy_match.group(1).strip() if fuzzy_match else f"未找到{key}内容"
-
-    # 特殊处理时间估算的量化信息
-    if 'time_estimate' in result:
-        time_text = result['time_estimate']
-        # 提取总时间
-        total_match = re.search(r'总计\s*(\d+)\s*分钟', time_text)
-        if total_match:
-            result['total_minutes'] = int(total_match.group(1))
+            # 若找不到则返回空字符串
+            result[name] = ""
     
-    # 处理进度事件的格式化
-    if 'progress_events' in result:
+    # 从 TIME_ESTIMATE 中解析总时间（单位：分钟）
+    if result.get("time_estimate"):
+        total_match = re.search(r'总计\s*(\d+)\s*分钟', result["time_estimate"])
+        if total_match:
+            result["total_minutes"] = int(total_match.group(1))
+    
+    # 解析 PROGRESS_EVENTS 部分为字典列表
+    if result.get("progress_events"):
         events = []
-        for line in result['progress_events'].split('\n'):
+        for line in result["progress_events"].split('\n'):
             if '%' in line:
                 percent, _, desc = line.partition('：')
-                events.append({
-                    'percent': int(percent.replace('%', '').strip()),
-                    'description': desc.strip()
-                })
-        result['progress_events'] = events
+                try:
+                    events.append({
+                        'percent': int(percent.replace('%', '').strip()),
+                        'description': desc.strip()
+                    })
+                except ValueError:
+                    continue
+        result["progress_events"] = events
+    else:
+        result["progress_events"] = []
     
     return result
 
 def extract_actions(text: str) -> List[Dict[str, Any]]:
+    """
+    从大模型返回文本中提取 [ACTIONS] 部分，并转换为 JSON 数组。
+    包含中文标点替换，确保 JSON 格式正确。
+    """
     start = text.find("[ACTIONS]") + len("[ACTIONS]")
     end = text.find("[/ACTIONS]")
     actions_str = text[start:end].strip()
+    logger.debug(f"原始 actions_str 内容:\n{actions_str}")
     
-    # 调试输出：打印原始内容
-    print(f"原始 actions_str 内容:\n{actions_str}")
-    
-    # 替换中文标点为英文标点
+    # 替换中文标点为英文标点，确保 JSON 格式正确
     actions_str = (
         actions_str
-        .replace("“", '"')  # 替换中文双引号（左）
-        .replace("”", '"')  # 替换中文双引号（右）
-        .replace("‘", "'")  # 替换中文单引号（左）
-        .replace("’", "'")  # 替换中文单引号（右）
-        .replace("：", ":")  # 替换中文冒号
-        .replace("，", ",")  # 替换中文逗号
-        .replace("；", ";")  # 替换中文分号
-        .replace("'", '"')  # 替换单引号为双引号（防止 LLM 使用单引号）
-                    )
-    
-    # 尝试解析并捕获错误
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .replace("：", ":")
+        .replace("，", ",")
+        .replace("；", ";")
+        .replace("'", '"')
+    )
     try:
         return json.loads(actions_str)
     except json.JSONDecodeError as e:
-        print(f"JSON 解析失败: {e}")
-        print(f"错误位置: 行 {e.lineno}, 列 {e.pos}")
-        # 尝试修复后再次解析（可选）
+        logger.error(f"JSON 解析失败: {e}，尝试补全外层中括号")
         try:
-            # 添加外层方括号（如果缺失）
             if not actions_str.startswith("["):
                 actions_str = f"[{actions_str}]"
             if not actions_str.endswith("]"):
                 actions_str = f"{actions_str}]"
             return json.loads(actions_str)
         except Exception as e2:
-            print(f"修复后仍失败: {e2}")
+            logger.error(f"修复后仍失败: {e2}")
             raise
 
 @app.post("/reload_characters", response_model=str)
 def reload_characters():
-    """手动触发角色数据库重新加载"""
+    """
+    接口：手动重新加载角色数据库。
+    """
     global characters_db
     try:
         characters_db = load_characters()
@@ -316,6 +301,9 @@ def reload_characters():
         raise HTTPException(status_code=500, detail=str(e))
 
 def save_characters(db):
+    """
+    将当前角色数据库保存到文件中。
+    """
     try:
         with open(CHARACTERS_DB_FILE, "w", encoding="utf-8") as f:
             json.dump(db, f, ensure_ascii=False, indent=2)
@@ -323,48 +311,61 @@ def save_characters(db):
     except Exception as e:
         logger.error(f"保存角色数据库失败: {str(e)}", exc_info=True)
 
-def update_characters(reflection_text):
-    global characters_db
+def reinforcement_learning_update(analysis: Dict[str, Any]):
+    """
+    调用 RLHF 接口，利用大模型生成的详细分析（包含思维链及对话）进行行为偏好更新和反思训练，
+    并将 RLHF 返回的建议更新到角色数据库中。
+    
+    注意：此处假设存在一个真实的 RLHF 服务接口（例如 REST API），你需要根据实际情况修改 RLHF 调用部分。
+    """
     try:
-        llm_prompt = f"""
-        根据以下反思内容，生成每个角色的优化后描述：
-        {reflection_text}
+        # 构造 RLHF 请求数据（此处直接使用分析内容作为训练参数，实际可扩展为更多参数）
+        rlhf_data = {
+            "analysis": analysis,
+            "characters": characters_db
+        }
+        # 模拟 RLHF 调用，这里直接使用大模型接口替代，
+        # 如果有真实服务，请替换为例如 requests.post("http://rlhf-service/update", json=rlhf_data)
+        rl_prompt = f"""
+        根据以下分析内容，针对各角色的行为决策偏好进行 RLHF 训练，请输出每个角色的更新建议：
+        分析内容：{json.dumps(analysis, ensure_ascii=False)}
         
         输出格式：
-        - ms：优化后的完整描述
-        - ms2：优化后的完整描述
-        - ms3：优化后的完整描述
+        - ms：更新建议
+        - ms2：更新建议
+        - ms3：更新建议
         """
-        
         response = Generation.call(
             model=Generation.Models.qwen_max,
-            prompt=llm_prompt,
+            prompt=rl_prompt,
             stream=False
         )
-        updated_text = response.output.text.strip()
-        logger.debug(f"LLM返回文本:\n{updated_text}")
-        
-        for line in updated_text.split('\n'):
+        rlhf_result = response.output.text.strip()
+        logger.info("RLHF 更新调用成功")
+        logger.debug(f"RLHF 返回结果：{rlhf_result}")
+
+        # 解析 RLHF 返回结果并更新角色数据库
+        for line in rlhf_result.split('\n'):
             if line.startswith('- '):
                 try:
-                    line = line[2:]  # 去除开头的 '- '
+                    # 去除前缀“- ”
+                    line = line[2:]
+                    # 根据冒号分割角色名称和新描述（注意使用中文冒号）
                     char_name_part, new_desc = line.split('：', 1)
                     char_name = char_name_part.strip().replace('*', '')
                     new_desc = new_desc.strip()
-                    
                     if char_name in characters_db:
                         characters_db[char_name]['description'] = new_desc
-                        logger.info(f"更新角色 {char_name} 的描述：{new_desc}")
+                        logger.info(f"RLHF 更新角色 {char_name} 的描述：{new_desc}")
                     else:
-                        logger.warning(f"无效的角色名称: {char_name}")
+                        logger.warning(f"RLHF 返回的无效角色名称: {char_name}")
                 except ValueError:
-                    logger.warning(f"无效的行格式: {line}")
-        
+                    logger.warning(f"无法解析 RLHF 更新行：{line}")
+        # 保存更新后的角色数据库到文件中
         save_characters(characters_db)
-        
     except Exception as e:
-        logger.error(f"更新角色失败: {str(e)}", exc_info=True)
-        raise
+        logger.error(f"RLHF 更新失败: {str(e)}", exc_info=True)
+
 
 if __name__ == "__main__":
     import uvicorn
