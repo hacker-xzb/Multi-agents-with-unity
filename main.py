@@ -26,7 +26,7 @@ SECTION_REGEX = re.compile(r'\[(\w+)\](.*?)\[/\1\]', re.DOTALL)
 CHARACTERS_DB_FILE = "characters_db.json"
 
 # 配置 dashscope API Key（请确保环境变量中已设置或直接填入有效的 API Key）
-dashscope.api_key = os.getenv("DASHSCOPE_API_KEY", "sk-your-real-api-key")
+dashscope.api_key = os.getenv("DASHSCOPE_API_KEY", "sk-af527af40b3c4d82bbebe333a99601cc")
 
 # 加载角色数据库；如文件不存在则使用默认值
 def load_characters() -> dict:
@@ -100,6 +100,7 @@ def process_text(request: TextRequest):
             prompt=prompt,
             stream=False
         )
+        print(response)
         generated_text = response.output.text.strip()
         logger.info("大模型返回文本成功")
         logger.debug(f"生成的文本：{generated_text}")
@@ -111,8 +112,8 @@ def process_text(request: TextRequest):
         
         # 若存在反思内容，更新角色描述并调用 RLHF 更新接口
         if reflection:
-            update_characters(reflection)
-            reinforcement_learning_update(analysis)
+            ## TODO 增加Agent学习模块
+            pass
         
         return {
             "analysis": analysis,
@@ -310,61 +311,6 @@ def save_characters(db):
         logger.info(f"角色数据库已保存到 {CHARACTERS_DB_FILE}")
     except Exception as e:
         logger.error(f"保存角色数据库失败: {str(e)}", exc_info=True)
-
-def reinforcement_learning_update(analysis: Dict[str, Any]):
-    """
-    调用 RLHF 接口，利用大模型生成的详细分析（包含思维链及对话）进行行为偏好更新和反思训练，
-    并将 RLHF 返回的建议更新到角色数据库中。
-    
-    注意：此处假设存在一个真实的 RLHF 服务接口（例如 REST API），你需要根据实际情况修改 RLHF 调用部分。
-    """
-    try:
-        # 构造 RLHF 请求数据（此处直接使用分析内容作为训练参数，实际可扩展为更多参数）
-        rlhf_data = {
-            "analysis": analysis,
-            "characters": characters_db
-        }
-        # 模拟 RLHF 调用，这里直接使用大模型接口替代，
-        # 如果有真实服务，请替换为例如 requests.post("http://rlhf-service/update", json=rlhf_data)
-        rl_prompt = f"""
-        根据以下分析内容，针对各角色的行为决策偏好进行 RLHF 训练，请输出每个角色的更新建议：
-        分析内容：{json.dumps(analysis, ensure_ascii=False)}
-        
-        输出格式：
-        - ms：更新建议
-        - ms2：更新建议
-        - ms3：更新建议
-        """
-        response = Generation.call(
-            model=Generation.Models.qwen_max,
-            prompt=rl_prompt,
-            stream=False
-        )
-        rlhf_result = response.output.text.strip()
-        logger.info("RLHF 更新调用成功")
-        logger.debug(f"RLHF 返回结果：{rlhf_result}")
-
-        # 解析 RLHF 返回结果并更新角色数据库
-        for line in rlhf_result.split('\n'):
-            if line.startswith('- '):
-                try:
-                    # 去除前缀“- ”
-                    line = line[2:]
-                    # 根据冒号分割角色名称和新描述（注意使用中文冒号）
-                    char_name_part, new_desc = line.split('：', 1)
-                    char_name = char_name_part.strip().replace('*', '')
-                    new_desc = new_desc.strip()
-                    if char_name in characters_db:
-                        characters_db[char_name]['description'] = new_desc
-                        logger.info(f"RLHF 更新角色 {char_name} 的描述：{new_desc}")
-                    else:
-                        logger.warning(f"RLHF 返回的无效角色名称: {char_name}")
-                except ValueError:
-                    logger.warning(f"无法解析 RLHF 更新行：{line}")
-        # 保存更新后的角色数据库到文件中
-        save_characters(characters_db)
-    except Exception as e:
-        logger.error(f"RLHF 更新失败: {str(e)}", exc_info=True)
 
 
 if __name__ == "__main__":
